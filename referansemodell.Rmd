@@ -92,42 +92,47 @@ train <- training(split)
 test <- testing(split)
 ```
 
-Vi lager recipe:
+Vi lager recipe og modell:
+
+**Merk:** Vi behandler her "karakter" som en numerisk variabel. Kan det være en idé å behandle den som kategorisk eller ordinal? 
 
 ```{r}
 rec <- recipe(total_karakter ~ er_kebab + tilsynsbesoektype + poststed, 
               data = train) %>% 
   step_impute_mean(all_numeric()) %>%
   step_impute_mode(all_nominal()) %>% 
-  step_other(poststed, threshold = 500) 
+  step_other(poststed, threshold = 500)
 
-prepped_rec <- rec %>% 
-  prep()
+# Angir at "penalty"-parameteret skal tunes
+lm_spec <- linear_reg() %>% 
+  set_engine("lm")
 
+# Lager workflow (kombinasjon av recipe + modell)
+wflow <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(lm_spec)
+
+best_model <- wflow %>% 
+  fit(data = train)
+
+# For sjekk av recipe:
+prepped_rec <- rec %>% prep()
 ptrain <- prepped_rec %>% bake(new_data = NULL)
 ptest <- prepped_rec %>% bake(new_data = test)
 ```
 
-Vi lager modell:
-
-**Merk:** Vi behandler her "karakter" som en numerisk variabel. Kan det være en idé å behandle den som kategorisk eller ordinal? 
 
 ```{r}
-best_model <- linear_reg() %>% 
-  set_engine("lm") %>% 
-  fit(total_karakter ~ er_kebab + tilsynsbesoektype + poststed, 
-      data = ptrain)
+best_model %>% 
+  pull_workflow_fit() %>% 
+  .$fit %>% 
+  summary()
 ```
-
-```{r}
-summary(best_model$fit)
-```
-
 
 Vi gjør prediksjoner med modellen:
 
 ```{r}
-preds <- predict(best_model, new_data = ptest)$.pred
+preds <- predict(best_model, new_data = test)$.pred
 ```
 
 Siden vi har behandlet input som numerisk må vi konvertere for å få "harde" prediksjoner. Vi velger her å bruke en enkel "round": 
@@ -170,15 +175,25 @@ mae_per_class %>%
 # Forbered levering
 Vi har nå testet modellen vår på dataen vi fikk tildelt, og ønsker å lage en innlevering med våre prediksjoner. 
 
+Først scorer vi datasettet:
+
 ```{r}
+# TODO: Erstatt med faktisk scoredatasett
 score_data <- df %>% slice_sample(n = 100)
+
+score_data <- score_data %>% 
+  mutate(final_prediction = predict(best_model, new_data = .)$.pred)
 ```
+
+Så lager vi output:
 
 ```{r}
 # Sett inn eget teamnavn
 teamnavn <- "boosted"
+fs::dir_create("output")
 
-scored_data %>% 
+output <- score_data %>% 
+  select(tilsynsobjektid, dato, final_prediction) %>% 
   write_csv2(str_glue("output/{teamnavn}_score.csv2"))
 ```
 
@@ -230,6 +245,7 @@ collect_metrics(lm_search) %>%
   filter(.metric == "mae") %>% 
   arrange(mean)
 ```
+
 ```{r}
 lm_search %>% autoplot()
 ```
