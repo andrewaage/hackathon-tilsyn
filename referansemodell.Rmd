@@ -1,0 +1,253 @@
+---
+title: "Startmodell"
+author: "André Waage Rivenæs"
+date: "2/4/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+
+df <- read_csv2("data/tilsyn.csv")
+```
+
+```{r}
+# Data cleaning
+df <- df %>% 
+  mutate(dato = lubridate::as_date(dato, format = "%d%m%Y"),
+         navn = str_to_upper(navn))
+```
+
+
+# EDA
+```{r}
+df %>% 
+  count(total_karakter)
+```
+
+Undersøker ny variabel "er_kebab", som er TRUE hvis navnet på organisasjonen inneholder ordet "kebab", og FALSE ellers:
+
+```{r}
+df <- df %>% 
+  mutate(er_kebab = str_detect(navn, "KEBAB"))
+
+df %>% 
+  group_by(er_kebab) %>% 
+  summarise(snittscore = mean(total_karakter),
+            n = n(),
+            andel_max_score = sum(total_karakter == 3) / n)
+```
+
+```{r}
+df %>%
+  count(er_kebab, total_karakter) %>%
+  group_by(er_kebab) %>% 
+  mutate(freq = n / sum(n)) %>% 
+  ggplot(aes(y = total_karakter, x = er_kebab)) +
+  geom_tile(aes(fill = freq)) +
+  geom_text(aes(label = scales::percent(freq))) +
+  scale_fill_gradient(low = "white", high = "cornflowerblue") +
+  theme_minimal() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  labs(y = "Total karakter", x = "Har organisasjonen *kebab* i navnet?")
+```
+Undersøker poststed:
+
+```{r}
+df %>%
+  mutate(poststed_lmp = forcats::fct_lump_min(poststed, min = 600)) %>% 
+  count(poststed_lmp, total_karakter) %>%
+  group_by(poststed_lmp) %>% 
+  mutate(freq = n / sum(n)) %>%
+  tidyr::drop_na() %>% 
+  ggplot(aes(y = total_karakter, x = poststed_lmp)) +
+  geom_tile(aes(fill = freq)) +
+  geom_text(aes(label = scales::percent(freq, accuracy = 0.01))) +
+  scale_fill_gradient(low = "white", high = "cornflowerblue") +
+  theme_minimal() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle = 45)) +
+  labs(y = "Total karakter", x = "Poststed")
+```
+
+
+Andre idéer til variabler:
+- Øvrige ord i bedriftsnavnet - det må vel være mer enn bare "kebab" som skiller seg ut? Er det her mest effektivt å resonnere seg frem til ord man skal lete etter, etter bruke automatiske metoder? 
+- Noe mer på postnummer/lokasjon - antakeligvis har enkelte steder høyere andel med restauranter som får god/dårlig score. 
+- Annen data vi kan finne på organisasjonsnummeret fra offentlige tilgjengelige kilder, f.eks. antall ansatte eller organisasjonsform. Det er altså lov å joine inn relevant data!
+- Dato - kan det være mer sannsynlig å få en god/dårlig vurdering i ulike måneder, år, dager?
+
+OBS: Data som ikke var tilgjengelig før tilsynet ble utført bør trolig ikke brukes, da det kan føre til time-travelling problematikk. 
+
+# Lag modell
+Vi splitter opp dataen i trening/testing:
+
+```{r}
+library(tidymodels)
+split <- initial_split(df)
+train <- training(split)
+test <- testing(split)
+```
+
+Vi lager recipe:
+
+```{r}
+rec <- recipe(total_karakter ~ er_kebab + tilsynsbesoektype + poststed, 
+              data = train) %>% 
+  step_impute_mean(all_numeric()) %>%
+  step_impute_mode(all_nominal()) %>% 
+  step_other(poststed, threshold = 500) 
+
+prepped_rec <- rec %>% 
+  prep()
+
+ptrain <- prepped_rec %>% bake(new_data = NULL)
+ptest <- prepped_rec %>% bake(new_data = test)
+```
+
+Vi lager modell:
+
+**Merk:** Vi behandler her "karakter" som en numerisk variabel. Kan det være en idé å behandle den som kategorisk eller ordinal? 
+
+```{r}
+best_model <- linear_reg() %>% 
+  set_engine("lm") %>% 
+  fit(total_karakter ~ er_kebab + tilsynsbesoektype + poststed, 
+      data = ptrain)
+```
+
+```{r}
+summary(best_model$fit)
+```
+
+
+Vi gjør prediksjoner med modellen:
+
+```{r}
+preds <- predict(best_model, new_data = ptest)$.pred
+```
+
+Siden vi har behandlet input som numerisk må vi konvertere for å få "harde" prediksjoner. Vi velger her å bruke en enkel "round": 
+
+```{r}
+ptest <- ptest %>% 
+  mutate(hard_pred = round(preds),
+         soft_pred = preds)
+```
+
+
+```{r}
+ptest %>% 
+  count(hard_pred)
+```
+
+```{r}
+ptest %>% 
+  ggplot(aes(x = soft_pred)) +
+  geom_density(fill = "cornflowerblue")
+```
+
+
+# Validering av modell
+Som valideringsmetric scores dere på macro-averaged MAE, som er et måltall som egner seg for ordinale utfall når utfallet er imbalanced, se mer:
+https://stats.stackexchange.com/questions/338904/measures-of-ordinal-classification-error-for-ordinal-regression
+
+Dette er gjennomsnittlig avvik per risikonivå. Det vil si at dersom du predikerer kun 0 eller 1 på alle (de vanligste verdiene), så vil du få en ganske dårlig score - fordi du vil straffes hardt for alle du bommer på som skulle hatt 2 eller 3, selv om det er veldig få av disse. 
+
+Dere velger selv om dere vil sende inn "harde prediksjoner" (eks: 0, 1, 2, 3) eller "myke" prediksjoner (eks: 0.13, 0.89, 2.42, 2.99). 
+
+```{r}
+mae_per_class <- ptest %>%
+  group_by(total_karakter) %>% 
+  mae(truth = total_karakter, estimate = hard_pred)
+
+mae_per_class %>% 
+  summarise(macro_mae = mean(.estimate))
+```
+# Forbered levering
+Vi har nå testet modellen vår på dataen vi fikk tildelt, og ønsker å lage en innlevering med våre prediksjoner. 
+
+```{r}
+score_data <- df %>% slice_sample(n = 100)
+```
+
+```{r}
+# Sett inn eget teamnavn
+teamnavn <- "boosted"
+
+scored_data %>% 
+  write_csv2(str_glue("output/{teamnavn}_score.csv2"))
+```
+
+# Appendix
+## Tuning
+Ønsker du å tune modellen, kan følgende kodesnutt hjelpe. Vi tuner her *glmnet*-modellen sitt "penalty"-parameter. 
+
+Merk at vi anbefaler ikke å bruke altfor mye tid på tuning da det ofte er lite å hente og tar mye tid (spesielt med dårlig PC), men dersom man er fornøyd med modellen ellers kan tuning være det "lille ekstra" som skiller førsteplass og andreplass!
+
+```{r}
+# For glmnet må vi lage dummys av kategoriske variabler
+rec <- rec %>% 
+  step_dummy(poststed)
+
+# Angir at "penalty"-parameteret skal tunes
+lm_spec <- linear_reg(penalty = tune()) %>% 
+  set_engine("glmnet")
+
+# Lager workflow (kombinasjon av recipe + modell)
+wflow <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(lm_spec)
+
+# Dials-pakken inneholder standard-grids for et utvalg av parametere
+# Her angitt med penalty()
+params <- wflow %>% 
+  parameters() %>% 
+  update(penalty = dials::penalty())
+
+# Lag CV og definer tuning-metode (her: Bayesiansk)
+cv_splits <- vfold_cv(train, v = 10)
+ctrl <- control_bayes(verbose = TRUE)
+
+# Definer metrics. Første metric angitt blir optimert etter.
+# OBS: For optimal tuning bør du bruke macro-averaged mae her
+val_metrics <- yardstick::metric_set(mae, rmse, rsq)
+
+# Kjør optimering
+lm_search <- tune_bayes(wflow, 
+                        resamples = cv_splits, 
+                        metrics = val_metrics,
+                        iter = 8,
+                        param_info = params, 
+                        control = ctrl)
+```
+
+```{r}
+collect_metrics(lm_search) %>%
+  filter(.metric == "mae") %>% 
+  arrange(mean)
+```
+```{r}
+lm_search %>% autoplot()
+```
+## Finne vanligste ord eller ngrams i orgnavn
+Under finner vi de vanligste ordene som opptrer i datasettet. Kanskje noen av de kan skille seg ut?
+
+```{r}
+library(tidytext)
+df %>% 
+  select(tilsynsobjektid, navn) %>% 
+  unnest_tokens(words, navn) %>% 
+  count(words, sort = TRUE)
+```
+Vi kan også se på n-grams, ved å se på ord som opptrer ved siden av hverandre.Ved å velge n = 2 får vi da f.eks. ut "Peppes pizza" som et vanlig bigram (altså sammensetning av 2 ord). 
+
+```{r}
+df %>% 
+  select(tilsynsobjektid, navn) %>% 
+  unnest_tokens(bigrams, navn, token = "ngrams", n = 2) %>% 
+  count(bigrams, sort = TRUE)
+```
