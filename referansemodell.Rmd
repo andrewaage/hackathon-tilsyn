@@ -1,22 +1,33 @@
 ---
-title: "Startmodell"
+title: "Referansemodell"
 author: "André Waage Rivenæs"
 date: "2/4/2022"
-output: html_document
+output: 
+ html_document:
+   toc: true
+   toc_float: true
+   theme: darkly
+   df_print: paged
+   code_folding: show
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
 
 library(tidyverse)
 
-df <- read_csv2("data/tilsyn.csv")
+# Obs: Legg begge datasettene fra drive i en mappe kalt "data" i prosjektområdet
+# df er datasettet du trener modellen din med
+# df_scoring er datasettet du skal score og vurderes på
+df <- read_csv2("data/treningsdata.csv")
+df_scoring <- read_csv2("data/scoringdata.csv")
 
 # Hent inn egne funksjoner fra R-folderen
 fs::dir_walk("R", source)
 
 theme_set(theme_minimal())
 ```
+
 
 ```{r}
 # Data cleaning
@@ -103,8 +114,10 @@ Vi lager recipe og modell:
 **Merk:** Vi behandler her "karakter" som en numerisk variabel. Kan det være en idé å behandle den som kategorisk eller ordinal?
 
 ```{r}
-rec <- recipe(total_karakter ~ er_kebab + tilsynsbesoektype + poststed, 
+rec <- recipe(total_karakter ~ navn + tilsynsbesoektype + poststed, 
               data = train) %>% 
+  step_mutate(er_kebab = str_detect(navn, "KEBAB")) %>%
+  step_rm(navn) %>% 
   step_impute_mean(all_numeric()) %>%
   step_impute_mode(all_nominal()) %>% 
   step_other(poststed, threshold = 500)
@@ -128,11 +141,17 @@ ptest <- prepped_rec %>% bake(new_data = test)
 ```
 
 ```{r}
+# OBS: Fungerer kun med lm / glm
 best_model %>% 
   pull_workflow_fit() %>% 
   .$fit %>% 
   summary()
 ```
+
+```{r}
+vip::vip(best_model %>% pull_workflow_fit())
+```
+
 
 Vi gjør prediksjoner med modellen:
 
@@ -192,23 +211,20 @@ Vi har nå testet modellen vår på dataen vi fikk tildelt, og ønsker å lage e
 Først scorer vi datasettet:
 
 ```{r}
-# TODO: Erstatt med faktisk scoredatasett
-score_data <- df %>% slice_sample(n = 100)
-
-score_data <- score_data %>% 
-  mutate(final_prediction = predict(best_model, new_data = .)$.pred)
+df_scoring <- df_scoring %>% 
+  mutate(final_prediction = round(predict(best_model, new_data = .)$.pred))
 ```
 
 Så lager vi output:
 
 ```{r}
 # Sett inn eget teamnavn
-teamnavn <- "boosted"
+teamnavn <- "refmodell"
 fs::dir_create("output")
 
-output <- score_data %>% 
-  select(tilsynsobjektid, dato, final_prediction) %>% 
-  write_csv2(str_glue("output/{teamnavn}_score.csv2"))
+output <- df_scoring %>% 
+  select(tilsynid, dato, final_prediction) %>% 
+  write_csv2(str_glue("output/{teamnavn}_score.csv"))
 ```
 
 # Appendix
@@ -244,13 +260,13 @@ cv_splits <- vfold_cv(train, v = 10)
 ctrl <- control_bayes(verbose = TRUE)
 
 # Definer metrics. Første metric angitt blir optimert etter.
-val_metrics <- yardstick::metric_set(mmae, mae, rmse, rsq)
+val_metrics <- yardstick::metric_set(mmae, mae)
 
 # Kjør optimering
 lm_search <- tune_bayes(wflow, 
                         resamples = cv_splits, 
                         metrics = val_metrics,
-                        iter = 8,
+                        iter = 3,
                         param_info = params, 
                         control = ctrl)
 ```
