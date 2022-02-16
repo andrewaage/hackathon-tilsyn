@@ -11,6 +11,11 @@ knitr::opts_chunk$set(echo = TRUE)
 library(tidyverse)
 
 df <- read_csv2("data/tilsyn.csv")
+
+# Hent inn egne funksjoner fra R-folderen
+fs::dir_walk("R", source)
+
+theme_set(theme_minimal())
 ```
 
 ```{r}
@@ -20,8 +25,8 @@ df <- df %>%
          navn = str_to_upper(navn))
 ```
 
-
 # EDA
+
 ```{r}
 df %>% 
   count(total_karakter)
@@ -49,10 +54,10 @@ df %>%
   geom_tile(aes(fill = freq)) +
   geom_text(aes(label = scales::percent(freq))) +
   scale_fill_gradient(low = "white", high = "cornflowerblue") +
-  theme_minimal() +
   theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
   labs(y = "Total karakter", x = "Har organisasjonen *kebab* i navnet?")
 ```
+
 Undersøker poststed:
 
 ```{r}
@@ -66,23 +71,24 @@ df %>%
   geom_tile(aes(fill = freq)) +
   geom_text(aes(label = scales::percent(freq, accuracy = 0.01))) +
   scale_fill_gradient(low = "white", high = "cornflowerblue") +
-  theme_minimal() +
   theme(panel.grid.major = element_blank(), 
         panel.grid.minor = element_blank(),
         axis.text.x = element_text(angle = 45)) +
   labs(y = "Total karakter", x = "Poststed")
 ```
 
+Andre idéer til variabler: 
 
-Andre idéer til variabler:
-- Øvrige ord i bedriftsnavnet - det må vel være mer enn bare "kebab" som skiller seg ut? Er det her mest effektivt å resonnere seg frem til ord man skal lete etter, etter bruke automatiske metoder? 
+- Øvrige ord i bedriftsnavnet - det må vel være mer enn bare "kebab" som skiller seg ut? 
+- Er det her mest effektivt å resonnere seg frem til ord man skal lete etter, etter bruke automatiske metoder? 
 - Noe mer på postnummer/lokasjon - antakeligvis har enkelte steder høyere andel med restauranter som får god/dårlig score. 
-- Annen data vi kan finne på organisasjonsnummeret fra offentlige tilgjengelige kilder, f.eks. antall ansatte eller organisasjonsform. Det er altså lov å joine inn relevant data!
-- Dato - kan det være mer sannsynlig å få en god/dårlig vurdering i ulike måneder, år, dager?
+- Annen data vi kan finne på organisasjonsnummeret fra offentlige tilgjengelige kilder, f.eks. antall ansatte eller organisasjonsform. Det er altså lov å joine inn relevant data! 
+- Dato: kan det være mer sannsynlig å få en god/dårlig vurdering i ulike måneder, år, dager?
 
-OBS: Data som ikke var tilgjengelig før tilsynet ble utført bør trolig ikke brukes, da det kan føre til time-travelling problematikk. 
+**OBS**: Data som ikke var tilgjengelig før tilsynet ble utført bør trolig ikke brukes, da det kan føre til time-travelling problematikk.
 
 # Lag modell
+
 Vi splitter opp dataen i trening/testing:
 
 ```{r}
@@ -94,7 +100,7 @@ test <- testing(split)
 
 Vi lager recipe og modell:
 
-**Merk:** Vi behandler her "karakter" som en numerisk variabel. Kan det være en idé å behandle den som kategorisk eller ordinal? 
+**Merk:** Vi behandler her "karakter" som en numerisk variabel. Kan det være en idé å behandle den som kategorisk eller ordinal?
 
 ```{r}
 rec <- recipe(total_karakter ~ er_kebab + tilsynsbesoektype + poststed, 
@@ -103,7 +109,7 @@ rec <- recipe(total_karakter ~ er_kebab + tilsynsbesoektype + poststed,
   step_impute_mode(all_nominal()) %>% 
   step_other(poststed, threshold = 500)
 
-# Angir at "penalty"-parameteret skal tunes
+# Angir spec
 lm_spec <- linear_reg() %>% 
   set_engine("lm")
 
@@ -121,7 +127,6 @@ ptrain <- prepped_rec %>% bake(new_data = NULL)
 ptest <- prepped_rec %>% bake(new_data = test)
 ```
 
-
 ```{r}
 best_model %>% 
   pull_workflow_fit() %>% 
@@ -135,14 +140,15 @@ Vi gjør prediksjoner med modellen:
 preds <- predict(best_model, new_data = test)$.pred
 ```
 
-Siden vi har behandlet input som numerisk må vi konvertere for å få "harde" prediksjoner. Vi velger her å bruke en enkel "round": 
+Siden vi har behandlet input som numerisk må vi konvertere for å få "harde" prediksjoner. Vi velger her å bruke en enkel "round":
 
 ```{r}
+preds <- pmax(pmin(preds, 3), 0)
+
 ptest <- ptest %>% 
   mutate(hard_pred = round(preds),
          soft_pred = preds)
 ```
-
 
 ```{r}
 ptest %>% 
@@ -155,14 +161,13 @@ ptest %>%
   geom_density(fill = "cornflowerblue")
 ```
 
-
 # Validering av modell
-Som valideringsmetric scores dere på macro-averaged MAE, som er et måltall som egner seg for ordinale utfall når utfallet er imbalanced, se mer:
-https://stats.stackexchange.com/questions/338904/measures-of-ordinal-classification-error-for-ordinal-regression
 
-Dette er gjennomsnittlig avvik per risikonivå. Det vil si at dersom du predikerer kun 0 eller 1 på alle (de vanligste verdiene), så vil du få en ganske dårlig score - fordi du vil straffes hardt for alle du bommer på som skulle hatt 2 eller 3, selv om det er veldig få av disse. 
+Som valideringsmetric scores dere på macro-averaged MAE, som er et måltall som egner seg for ordinale utfall når utfallet er imbalanced, se mer [her](https://stats.stackexchange.com/questions/338904/measures-of-ordinal-classification-error-for-ordinal-regression).
 
-Dere velger selv om dere vil sende inn "harde prediksjoner" (eks: 0, 1, 2, 3) eller "myke" prediksjoner (eks: 0.13, 0.89, 2.42, 2.99). 
+Dette er gjennomsnittlig avvik per risikonivå. Det vil si at dersom du predikerer kun 0 eller 1 på alle (de vanligste verdiene), så vil du få en ganske dårlig score - fordi du vil straffes hardt for alle du bommer på som skulle hatt 2 eller 3, selv om det er veldig få av disse.
+
+Dere velger selv om dere vil sende inn "harde prediksjoner" (eks: 0, 1, 2, 3) eller "myke" prediksjoner (eks: 0.13, 0.89, 2.42, 2.99).
 
 ```{r}
 mae_per_class <- ptest %>%
@@ -172,8 +177,17 @@ mae_per_class <- ptest %>%
 mae_per_class %>% 
   summarise(macro_mae = mean(.estimate))
 ```
+
+Merk at vi også har laget en "custom" yardstick-variant av Macro-MAE til dere, som kanskje kan brukes for tuning? Koden for denne finnes i R-folderen.
+
+```{r}
+ptest %>% 
+  mmae(truth = total_karakter, estimate = hard_pred)
+```
+
 # Forbered levering
-Vi har nå testet modellen vår på dataen vi fikk tildelt, og ønsker å lage en innlevering med våre prediksjoner. 
+
+Vi har nå testet modellen vår på dataen vi fikk tildelt, og ønsker å lage en innlevering med våre prediksjoner.
 
 Først scorer vi datasettet:
 
@@ -198,8 +212,10 @@ output <- score_data %>%
 ```
 
 # Appendix
+
 ## Tuning
-Ønsker du å tune modellen, kan følgende kodesnutt hjelpe. Vi tuner her *glmnet*-modellen sitt "penalty"-parameter. 
+
+Ønsker du å tune modellen, kan følgende kodesnutt hjelpe. Vi tuner her *glmnet*-modellen sitt "penalty"-parameter.
 
 Merk at vi anbefaler ikke å bruke altfor mye tid på tuning da det ofte er lite å hente og tar mye tid (spesielt med dårlig PC), men dersom man er fornøyd med modellen ellers kan tuning være det "lille ekstra" som skiller førsteplass og andreplass!
 
@@ -228,8 +244,7 @@ cv_splits <- vfold_cv(train, v = 10)
 ctrl <- control_bayes(verbose = TRUE)
 
 # Definer metrics. Første metric angitt blir optimert etter.
-# OBS: For optimal tuning bør du bruke macro-averaged mae her
-val_metrics <- yardstick::metric_set(mae, rmse, rsq)
+val_metrics <- yardstick::metric_set(mmae, mae, rmse, rsq)
 
 # Kjør optimering
 lm_search <- tune_bayes(wflow, 
@@ -242,14 +257,16 @@ lm_search <- tune_bayes(wflow,
 
 ```{r}
 collect_metrics(lm_search) %>%
-  filter(.metric == "mae") %>% 
+  filter(.metric == "mmae") %>% 
   arrange(mean)
 ```
 
 ```{r}
 lm_search %>% autoplot()
 ```
+
 ## Finne vanligste ord eller ngrams i orgnavn
+
 Under finner vi de vanligste ordene som opptrer i datasettet. Kanskje noen av de kan skille seg ut?
 
 ```{r}
@@ -259,7 +276,8 @@ df %>%
   unnest_tokens(words, navn) %>% 
   count(words, sort = TRUE)
 ```
-Vi kan også se på n-grams, ved å se på ord som opptrer ved siden av hverandre.Ved å velge n = 2 får vi da f.eks. ut "Peppes pizza" som et vanlig bigram (altså sammensetning av 2 ord). 
+
+Vi kan også se på n-grams, ved å se på ord som opptrer ved siden av hverandre.Ved å velge n = 2 får vi da f.eks. ut "Peppes pizza" som et vanlig bigram (altså sammensetning av 2 ord).
 
 ```{r}
 df %>% 
